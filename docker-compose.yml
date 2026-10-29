@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database Service
+  postgres:
+    image: postgres:16-alpine
+    container_name: escrow_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in the environment}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in the environment}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?Set POSTGRES_USER} -d ${POSTGRES_DB:?Set POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - escrow_network
+
+  # Sub-Merchant Payment Escrow Hub Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: escrow_app
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}?schema=public
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the environment}
+      PLATFORM_DEFAULT_FEE_PCT: "2.5"
+      PLATFORM_FIXED_FEE_CENTS: "30"
+    ports:
+      - "3000:3000"
+    networks:
+      - escrow_network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  escrow_network:
+    driver: bridge

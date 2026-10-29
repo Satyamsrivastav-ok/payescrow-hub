@@ -1,0 +1,298 @@
+// Prisma Schema for Sub-Merchant Payment Escrow Hub
+// Database: PostgreSQL
+// Monetary Convention: Integer paise (INR * 100), zero floating-point arithmetic.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MerchantStatus {
+  ACTIVE
+  UNDER_REVIEW
+  SUSPENDED
+}
+
+enum OrderStatus {
+  CREATED
+  PAYMENT_PENDING
+  FUNDED
+  PARTIALLY_RELEASED
+  RELEASED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum SplitType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+enum MilestoneStatus {
+  PENDING
+  SUBMITTED
+  APPROVED
+  REJECTED
+  DISBURSED
+}
+
+enum PayoutStatus {
+  PENDING
+  IN_TRANSIT
+  PROCESSED
+  FAILED
+  CANCELLED
+}
+
+enum LedgerEntryType {
+  DEBIT
+  CREDIT
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+// 1. User
+model User {
+  id           String       @id @default(uuid())
+  email        String       @unique
+  name         String
+  passwordHash String       @default("")
+  role         String       @default("MERCHANT") // ADMIN, MERCHANT, OPERATOR
+  merchantId   String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  merchant     Merchant?    @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  auditEvents  AuditEvent[]
+
+  @@index([role])
+  @@index([merchantId])
+  @@map("users")
+}
+
+// 2. Merchant (Sub-merchant on the marketplace)
+model Merchant {
+  id                 String         @id @default(uuid())
+  merchantCode       String         @unique // e.g. "MER-BLR-01"
+  businessName       String
+  legalName          String
+  contactEmail       String         @unique
+  contactPhone       String?
+  status             MerchantStatus @default(ACTIVE)
+  bankName           String
+  accountNumberLast4 String
+  ifscCode           String
+  defaultCommissionBps Int         @default(250) // 2.50% default platform fee
+  fixedFeePaise      Int            @default(3000) // ₹30.00 fixed in paise
+  totalEscrowHeldPaise Int            @default(0)
+  totalDisbursedPaise  Int            @default(0)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  allocations        OrderAllocation[]
+  payouts            Payout[]
+  ledgerEntries      LedgerEntry[]
+  users              User[]
+
+  @@index([status])
+  @@map("merchants")
+}
+
+// 3. Order (Marketplace order with multi-party splits)
+model Order {
+  id                 String      @id @default(uuid())
+  orderNumber        String      @unique // e.g. "ORD-2026-1001"
+  customerReference  String
+  customerEmail      String
+  totalAmountPaise   Int         // Total cart value in integer paise
+  platformFeePaise   Int         // Marketplace retained fee in paise
+  currency           String      @default("INR")
+  status             OrderStatus @default(CREATED)
+  description        String
+  fundedAt           DateTime?
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  allocations        OrderAllocation[]
+  milestones         Milestone[]
+  payments           Payment[]
+  payouts            Payout[]
+  ledgerEntries      LedgerEntry[]
+  auditEvents        AuditEvent[]
+
+  @@index([status])
+  @@index([orderNumber])
+  @@map("orders")
+}
+
+// 4. OrderAllocation (Split per sub-merchant)
+model OrderAllocation {
+  id                 String    @id @default(uuid())
+  orderId            String
+  merchantId         String
+  splitType          SplitType @default(PERCENTAGE)
+  splitValue         Float     // percentage value (e.g. 60.0%) or fixed paise
+  grossAmountPaise   Int       // Calculated gross item value for merchant
+  merchantFeePaise   Int       // Fee charged to this merchant
+  netAmountPaise     Int       // Net amount merchant receives after release
+  releasedAmountPaise Int      @default(0)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  order              Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  merchant           Merchant  @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  milestones         Milestone[]
+  payouts            Payout[]
+
+  @@unique([orderId, merchantId])
+  @@index([orderId])
+  @@index([merchantId])
+  @@map("order_allocations")
+}
+
+// 5. Payment (Inbound buyer payment capture)
+model Payment {
+  id                 String        @id @default(uuid())
+  paymentReference   String        @unique // e.g. "PAY-2026-9041"
+  orderId            String
+  amountPaise        Int
+  currency           String        @default("INR")
+  paymentMethod      String        @default("UPI_AUTOPAY") // UPI, NETBANKING, CARD, IMPS
+  status             PaymentStatus @default(PENDING)
+  providerReference  String?
+  capturedAt         DateTime?
+  failureReason      String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  order              Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("payments")
+}
+
+// 6. Milestone (Escrow release conditions)
+model Milestone {
+  id                 String          @id @default(uuid())
+  milestoneCode      String          @unique // e.g. "MLS-101-01"
+  orderId            String
+  allocationId       String?
+  title              String
+  description        String
+  deliverableDue     DateTime?
+  amountPaise        Int             // Funds unlocked by this milestone
+  status             MilestoneStatus @default(PENDING)
+  approvedAt         DateTime?
+  approvedBy         String?
+  approvalReason     String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  order              Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  allocation         OrderAllocation? @relation(fields: [allocationId], references: [id], onDelete: SetNull)
+  payouts            Payout[]
+
+  @@index([orderId])
+  @@index([status])
+  @@map("milestones")
+}
+
+// 7. Payout (Outbound transfer to sub-merchant bank)
+model Payout {
+  id                 String       @id @default(uuid())
+  payoutReference    String       @unique // e.g. "PO-2026-ACH-101"
+  orderId            String
+  merchantId         String
+  allocationId       String?
+  milestoneId        String?
+  amountPaise        Int
+  currency           String       @default("INR")
+  status             PayoutStatus @default(PENDING)
+  payoutMethod       String       @default("NEFT") // NEFT, RTGS, IMPS, UPI
+  idempotencyKey     String       @unique
+  failureReason      String?
+  retryCount         Int          @default(0)
+  initiatedAt        DateTime     @default(now())
+  processedAt        DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  order              Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  merchant           Merchant         @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  allocation         OrderAllocation? @relation(fields: [allocationId], references: [id], onDelete: SetNull)
+  milestone          Milestone?       @relation(fields: [milestoneId], references: [id], onDelete: SetNull)
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([status])
+  @@map("payouts")
+}
+
+// 8. LedgerEntry (Double-entry accounting journal)
+model LedgerEntry {
+  id                 String          @id @default(uuid())
+  entryGroupRef      String          // Groups balancing debit & credit legs (e.g. "TXG-2026-001")
+  orderId            String?
+  merchantId         String?
+  accountName        String          // e.g. "ESCROW_CUSTODIAL_WALLET", "SUB_MERCHANT_PAYABLE", "PLATFORM_COMMISSION"
+  entryType          LedgerEntryType // DEBIT or CREDIT
+  amountPaise        Int             // Always positive integer in paise
+  narration          String
+  createdAt          DateTime        @default(now())
+
+  order              Order?          @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  merchant           Merchant?       @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+
+  @@index([entryGroupRef])
+  @@index([accountName])
+  @@index([orderId])
+  @@map("ledger_entries")
+}
+
+// 9. IdempotencyRecord (Deduplication for financial payout requests)
+model IdempotencyRecord {
+  id           String   @id @default(uuid())
+  key          String   @unique
+  endpoint     String
+  requestHash  String
+  responseCode Int
+  responseBody String   @db.Text
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  @@index([key])
+  @@map("idempotency_records")
+}
+
+// 10. AuditEvent (Append-only security and operational audit trail)
+model AuditEvent {
+  id          String   @id @default(uuid())
+  entityType  String   // ORDER, MERCHANT, MILESTONE, PAYOUT, ESCROW
+  entityId    String
+  action      String   // ORDER_CREATED, MILESTONE_APPROVED, PAYOUT_DISPATCHED, LEDGER_POSTED
+  actor       String   // user:admin@escrow.internal or system:auto_escrow
+  details     String   // Human-readable narrative
+  metadata    String?  @db.Text // JSON string of state delta
+  orderId     String?
+  userId      String?
+  createdAt   DateTime @default(now())
+
+  order       Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_events")
+}

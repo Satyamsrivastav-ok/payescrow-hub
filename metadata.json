@@ -1,0 +1,6 @@
+{
+  "name": "Sub-Merchant Payment Escrow Hub",
+  "description": "Multi-party payment escrow, automated fee withholding, milestone-based releases, and sub-merchant payout management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
